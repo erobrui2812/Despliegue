@@ -1,0 +1,25 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Plantilla Route53
+
+Resources:
+  StudentsHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: students.internal
+      HostedZoneConfig:
+        Comment: "students.internal"
+      HostedZoneTags:
+        - Key: "Environment"
+          Value: "Internal"
+
+  StudentsRecordSet:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref StudentsHostedZone
+      Comment: "students.internal"
+      RecordSets:
+        - Name: students.internal.
+          Type: A
+          TTL: 60
+          ResourceRecords:
+            - !ImportValue "TomcatElias-TomcatPrivateIp"
