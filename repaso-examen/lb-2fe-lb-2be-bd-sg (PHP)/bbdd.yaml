@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Plantilla Bbdd.
+
+Parameters:
+  NombreInstancia:
+    Description: Nombre de la instancia
+    Type: String
+
+  AMI:
+    Description: Imagen SO
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id
+
+  VPC:
+    Description: VPC
+    Type: AWS::EC2::VPC::Id
+
+  KeyName:
+    Description: Par de llaves
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+
+  InstanceType:
+    Description: Recursos instancia
+    Type: String
+    Default: t2.large
+    AllowedValues:
+      - t2.micro
+      - t2.large
+
+Resources:
+  InstanciaEC2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: 1
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref NombreInstancia
+      ImageId: !Ref AMI
+      InstanceType: !Ref InstanceType      
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - Fn::ImportValue: BackendSecurityGroup
+        - Fn::ImportValue: SshSecurityGroup
+        - Fn::ImportValue: SqlSecurityGroup
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe
+            exec > /tmp/userdata.log 2>&1
+            #====================================================================#
+            # PREPARAR BOOTSTRAP DE CFN HELPER SCRIPTS
+            #====================================================================#
+            apt update -y
+            apt install python3-pip -y
+            pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            ln -s /usr/local/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+            #====================================================================#
+
+            sudo sed -i 's/^\$nrconf{restart} = "i";/\$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf
+            sudo sed -i 's/^\$nrconf{kernelhints} = -1;/\$nrconf{kernelhints} = -1;/' /etc/needrestart/needrestart.conf
+            sudo sed -i 's/^\$nrconf{checks} = 1;/\$nrconf{checks} = 0;/' /etc/needrestart/needrestart.conf
+
+            apt upgrade -y
+
+            apt install mysql-server -y
+
+            sed -i 's/^bind-address\s*=.*/bind-address = 0.0.0.0/' /etc/mysql/mysql.conf.d/mysqld.cnf
+
+            systemctl restart mysql
+            systemctl enable mysql
+
+            #====================================================================#
+            # CREAR BASE DE DATOS Y USUARIO EN MYSQL
+            #====================================================================#
+            DB_NAME="student_db"
+            DB_USER="phpuser"
+            DB_PASSWORD="phpuser"
+
+            mysql <<EOF
+            -- Crear la base de datos
+            CREATE DATABASE IF NOT EXISTS $DB_NAME;
+
+            -- Usar la base de datos
+            USE $DB_NAME;
+
+            -- Crear la tabla 'students'
+            CREATE TABLE IF NOT EXISTS students (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(50),
+                email VARCHAR(100) NOT NULL
+            );
+
+            -- Crear el usuario y otorgarle permisos
+            CREATE USER IF NOT EXISTS '$DB_USER'@'%' IDENTIFIED BY '$DB_PASSWORD';
+            GRANT SELECT, INSERT ON $DB_NAME.* TO '$DB_USER'@'%';
+            FLUSH PRIVILEGES;
+            EOF
+
+            #====================================================================#
+            # Este tiene que ser tu ultima instruccion del script
+            # Recuerda modificar el valor del --resource al id lógico de la instancia
+            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource InstanciaEC2 --region ${AWS::Region}
+
+Outputs:
+  IPPrivada:
+    Description: IP privada Bd
+    Value: !GetAtt InstanciaEC2.PrivateIp
+    Export:
+      Name: PrivateIpSql
+  IPublica:
+    Description: IP publica Bd
+    Value: !GetAtt InstanciaEC2.PublicIp
+    Export:
+      Name: PublicIpSql

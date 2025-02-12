@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Plantilla Backend.
+
+Parameters:
+  NombreInstancia:
+    Description: Nombre de la instancia
+    Type: String
+
+  AMI:
+    Description: Imagen SO
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id
+
+  VPC:
+    Description: VPC
+    Type: AWS::EC2::VPC::Id
+
+  KeyName:
+    Description: Par de llaves
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+
+  InstanceType:
+    Description: Recursos instancia
+    Type: String
+    Default: t2.large
+    AllowedValues:
+      - t2.micro
+      - t2.large
+
+Resources:
+  InstanciaEC2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: 1
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref NombreInstancia
+      ImageId: !Ref AMI
+      InstanceType: !Ref InstanceType      
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - Fn::ImportValue: HttpSecurityGroup
+        - Fn::ImportValue: SshSecurityGroup
+        - Fn::ImportValue: SqlSecurityGroup
+      UserData:
+        Fn::Base64: !Sub 
+          - |
+            #!/bin/bash -xe
+            exec > /tmp/userdata.log 2>&1
+            #====================================================================#
+            # PREPARAR BOOTSTRAP DE CFN HELPER SCRIPTS
+            #====================================================================#
+            apt update -y
+            apt install python3-pip -y
+            pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            ln -s /usr/local/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+            #====================================================================#
+
+            sudo sed -i 's/^\$nrconf{restart} = "i";/\$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf
+            sudo sed -i 's/^\$nrconf{kernelhints} = -1;/\$nrconf{kernelhints} = -1;/' /etc/needrestart/needrestart.conf
+            sudo sed -i 's/^\$nrconf{checks} = 1;/\$nrconf{checks} = 0;/' /etc/needrestart/needrestart.conf
+
+            apt upgrade -y
+
+            apt install apache2 -y
+            systemctl start apache2
+            systemctl enable apache2
+
+            #Instalar Php
+            apt install php libapache2-mod-php php-mysql -y
+
+            #Instalar MySql-Client
+            apt install mysql-client -y
+
+            a2enmod rewrite
+            systemctl restart apache2
+
+            echo -e "<VirtualHost *:80>
+            DocumentRoot /var/www/html
+            <Directory /var/www/html>
+                Options Indexes FollowSymLinks MultiViews
+                AllowOverride All
+                Require all granted
+            </Directory>
+            # Redirige las solicitudes API al archivo index.php
+            RewriteEngine On
+            RewriteRule ^/api/health$ /var/www/html/api/index.php [L]
+            RewriteRule ^/api/students$ /var/www/html/api/index.php [L]
+            # Añadir más reglas según los endpoints que tengas
+            </VirtualHost>" > /etc/apache2/sites-available/000-default.conf
+            systemctl restart apache2
+
+            cd /var/www/html
+            rm -rf /var/www/html/*
+
+            git clone https://github.com/DavidHormigoRamirez/backend_daw.git /var/www/html
+
+            chmod -R 777 /var/www/html
+            chown -R www-data:www-data /var/www/html
+
+            cd api/
+            sed -i "s/define('DB_HOST', 'TOBECHANGED')/define('DB_HOST', '${IPBBDD}')/g" db.php
+            sed -i "s/define('DB_NAME', 'TOBECHANGED')/define('DB_NAME', 'student_db')/g" db.php
+            sed -i "s/define('DB_USER', 'TOBECHANGED')/define('DB_USER', 'phpuser')/g" db.php
+            sed -i "s/define('DB_PASS', 'TOBECHANGED')/define('DB_PASS', 'phpuser')/g" db.php
+            
+            systemctl enable apache2
+            systemctl start apache2
+
+
+            #====================================================================#
+            # Este tiene que ser tu ultima instruccion del script
+            # Recuerda modificar el valor del --resource al id lógico de la instancia
+            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource InstanciaEC2 --region ${AWS::Region}
+          
+          - { IPBBDD: !ImportValue PublicIpSql }
+Outputs:
+  IPPrivada:
+    Description: IP privada Backend2
+    Value: !GetAtt InstanciaEC2.PrivateIp
+    Export:
+      Name: PrivateIpBack2
+  IPublica:
+    Description: IP publica Backend2
+    Value: !GetAtt InstanciaEC2.PublicIp
+    Export:
+      Name: PublicIpBack2
