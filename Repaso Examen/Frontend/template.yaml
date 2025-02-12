@@ -1,0 +1,107 @@
+#Elias
+AWSTemplateFormatVersion: 2010-09-09
+Description: Plantilla Básica para Tomcat y Route53
+
+Parameters:
+  InstanceTypeParameter:
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id'
+
+Resources:
+  Frontend:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: 1
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceTypeParameter
+      KeyName: vockey
+      SecurityGroupIds:
+        - !ImportValue "EliasSG-FrontendGroup"
+        - !ImportValue "EliasSG-SecurityGroup"
+      UserData: 
+        Fn::Base64: 
+          !Sub 
+            - |
+              #!/bin/bash -xe
+              exec > /tmp/userdata.log 2>&1
+              #====================================================================#
+              # PREPARAR BOOTSTRAP DE CFN HELPER SCRIPTS
+              #====================================================================#
+              apt update -y
+              apt install python3-pip -y
+              pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+              ln -s /usr/local/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+              #====================================================================#
+              #!/bin/bash
+
+              sudo sed -i 's/^\$nrconf{restart} = "i";/\$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf
+              sudo sed -i 's/^\$nrconf{kernelhints} = -1;/\$nrconf{kernelhints} = -1;/' /etc/needrestart/needrestart.conf
+              sudo sed -i 's/^\$nrconf{checks} = 1;/\$nrconf{checks} = 0;/' /etc/needrestart/needrestart.conf
+
+              apt update -y
+              apt upgrade -y
+              apt install apache2 -y
+
+              a2enmod proxy
+              a2enmod proxy_http
+              
+              rm -r /var/www/html
+              git clone https://github.com/DavidHormigoRamirez/frontend_daw.git /var/www/html
+              cd /var/www/html 
+
+              
+              sed -i "s#'CAMBIAR'#'/api/students'#g" create.html
+              sed -i "s#'CAMBIAR'#'/api/students'#g" index.html
+              
+
+              cat <<EOF > /etc/apache2/sites-available/frontend.conf
+              <VirtualHost *:80>
+                  ServerAdmin webmaster@localhost
+                  DocumentRoot /var/www/html
+              
+                  ProxyPreserveHost On
+                  ProxyPass /api/ http://${BackendIP}:8080/studentify/api/
+                  ProxyPassReverse /api/ http://${BackendIP}:8080/studentify/api/
+              
+                  <Directory /var/www/html>
+                      Options Indexes FollowSymLinks MultiViews
+                      AllowOverride All
+                      Require all granted
+                  </Directory>
+              
+                  ErrorLog /var/log/apache2/error.log
+                  CustomLog /var/log/apache2/access.log combined
+              </VirtualHost>
+              EOF
+              
+              a2dissite 000-default.conf
+              a2ensite frontend.conf
+              systemctl restart apache2
+              
+              /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Frontend --region ${AWS::Region}
+            - {BackendIP: !ImportValue BackendElias-TomcatPrivateIp}
+
+Outputs:
+  FrontendPrivateIp:
+    Description: IP Privada de la instancia de Frontend
+    Value: !GetAtt Frontend.PrivateIp
+    Export:
+      Name: !Sub "${AWS::StackName}-FrontendPrivateIp"
+
+  FrontendHealthUrl:
+    Description: URL de Health del Frontend
+    Value: !Sub "http://${Frontend.PrivateIp}/api/health"
+    Export:
+      Name: !Sub "${AWS::StackName}-FrontendHealthUrl"

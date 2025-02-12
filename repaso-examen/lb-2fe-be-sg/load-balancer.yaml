@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Plantilla LoadBalancer.
+
+Parameters:
+  NombreInstancia:
+    Description: Nombre de la instancia
+    Type: String
+
+  AMI:
+    Description: Imagen SO
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id
+
+  VPC:
+    Description: VPC
+    Type: AWS::EC2::VPC::Id
+
+  KeyName:
+    Description: Par de llaves
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+
+  InstanceType:
+    Description: Recursos instancia
+    Type: String
+    Default: t2.large
+    AllowedValues:
+      - t2.micro
+      - t2.large
+       
+  Subnet:
+      Description: Subred *OBLIGATORIO*
+      Type: AWS::EC2::Subnet::Id
+
+Resources:
+  LoadBalancer:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: 1
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref NombreInstancia
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMI
+      KeyName: !Ref KeyName
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - Fn::ImportValue: SshSecurityGroup
+        - Fn::ImportValue: HttpSecurityGroup
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+            exec > /tmp/userdata.log 2>&1
+            #====================================================================#
+            # PREPARAR BOOTSTRAP DE CFN HELPER SCRIPTS
+            #====================================================================#
+            apt update -y
+            apt install python3-pip -y
+            pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            ln -s /usr/local/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+            #====================================================================#
+
+            apt upgrade -y
+            apt install -y nginx
+            
+            rm -f /etc/nginx/sites-enabled/default
+            cat > /etc/nginx/conf.d/loadbalancer.conf <<EOF
+            upstream frontend_servers {
+                server ${Front1}:80;
+                server ${Front2}:80;
+            }
+
+            server {
+                listen 80;
+                server_name _;
+                
+                location / {
+                    proxy_pass http://frontend_servers;
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                }
+            }
+            EOF
+            nginx -t && systemctl restart nginx
+            systemctl enable nginx
+            
+            #====================================================================#
+            # Este tiene que ser tu ultima instruccion del script
+            # Recuerda modificar el valor del --resource al id lógico de la instancia
+            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LoadBalancer --region ${AWS::Region}
+
+          - { Front1: !ImportValue PublicIpFrontend1, Front2: !ImportValue PublicIpFrontend2 }
+
+Outputs:
+  LoadBalancerPublicIP:
+    Description: IP publica LoadBalancer 
+    Value: !GetAtt LoadBalancer.PublicIp
+    Export:
+      Name: LoadBalancerPublicIP

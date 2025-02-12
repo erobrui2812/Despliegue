@@ -1,0 +1,67 @@
+#Elias
+AWSTemplateFormatVersion: 2010-09-09
+Description: Plantilla AWS CloudFormation para crear grupos de seguridad
+
+Parameters:
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC para el grupo de seguridad
+    Default: vpc-02611d719c224d9bf
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VPCId: !Ref VPC
+      GroupDescription: Allow SSH to client host
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  BackendGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VPCId: !Ref VPC
+      GroupDescription: Allow traffic on port 8080 to client host
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  FrontendGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VPCId: !Ref VPC
+      GroupDescription: Allow HTTP traffic to client host
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+          FromPort: 8080
+          ToPort: 8080
+
+Outputs:
+  SecurityGroup:
+    Description: ID del grupo de seguridad SSH
+    Value: !Ref SecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityGroup"
+
+  BackendGroup:
+    Description: ID del grupo de seguridad para el backend
+    Value: !Ref BackendGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-BackendGroup"
+
+  FrontendGroup:
+    Description: ID del grupo de seguridad para el frontend
+    Value: !Ref FrontendGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-FrontendGroup"
