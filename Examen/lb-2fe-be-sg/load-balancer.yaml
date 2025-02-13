@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Plantilla LoadBalancer.
+
+Parameters:
+  AMI:
+    Description: Imagen SO
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id
+
+  VPC:
+    Description: VPC
+    Type: AWS::EC2::VPC::Id
+
+  KeyName:
+    Description: Par de llaves
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+
+  InstanceType:
+    Description: Recursos instancia
+    Type: String
+    Default: t2.large
+    AllowedValues:
+      - t2.micro
+      - t2.large
+       
+  Subnet:
+      Description: Subred *OBLIGATORIO*
+      Type: AWS::EC2::Subnet::Id
+
+Resources:
+  LoadBalancer:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: 1
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LoadBalancer
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMI
+      KeyName: !Ref KeyName
+      SubnetId: !Ref Subnet
+      SecurityGroupIds:
+        - Fn::ImportValue: SshSecurityGroup
+        - Fn::ImportValue: HttpSecurityGroup
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash -xe
+            exec > /tmp/userdata.log 2>&1
+            #====================================================================#
+            # PREPARAR BOOTSTRAP DE CFN HELPER SCRIPTS
+            #====================================================================#
+            apt update -y
+            apt install python3-pip -y
+            pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+            ln -s /usr/local/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+            #====================================================================#
+
+            sudo sed -i 's/^\$nrconf{restart} = "i";/\$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf
+            sudo sed -i 's/^\$nrconf{kernelhints} = -1;/\$nrconf{kernelhints} = -1;/' /etc/needrestart/needrestart.conf
+            sudo sed -i 's/^\$nrconf{checks} = 1;/\$nrconf{checks} = 0;/' /etc/needrestart/needrestart.conf
+
+            apt upgrade -y
+            apt install -y apache2
+
+            a2enmod proxy
+            a2enmod proxy_http
+            a2enmod proxy_balancer
+            a2enmod lbmethod_byrequests
+          
+            a2dissite 000-default.conf
+            cat > /etc/apache2/sites-available/loadbalancer.conf <<EOF
+
+            <VirtualHost *:80>
+                ServerAlias *
+
+                <Proxy balancer://front-cluster>
+                    BalancerMember http://${Front1}
+                    BalancerMember http://${Front2}
+                    ProxySet lbmethod=byrequests
+                </Proxy>
+
+                ProxyPass "/" "balancer://front-cluster/"
+                ProxyPassReverse "/" "balancer://front-cluster/"
+            </VirtualHost>
+            EOF
+
+            a2ensite loadbalancer.conf
+            systemctl restart apache2
+            systemctl enable apache2
+
+            #====================================================================#
+            # Este tiene que ser tu última instrucción del script
+            # Recuerda modificar el valor del --resource al id lógico de la instancia
+            /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LoadBalancer --region ${AWS::Region}
+
+          - { Front1: !ImportValue PrivateIpFrontend1, Front2: !ImportValue PrivateIpFrontend2 }
+
+Outputs:
+  LoadBalancerPublicIP:
+    Description: IP publica LoadBalancer 
+    Value: !GetAtt LoadBalancer.PublicIp
+    Export:
+      Name: LoadBalancerPublicIP
